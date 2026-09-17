@@ -675,6 +675,34 @@ if(GPU_ARCH STREQUAL "120")
   )
 endif()
 
+# ── Skinny FP8 decoder GEMM family (sm_120a mma.kind::f8f6f4 + PDL) ──
+# Small-row action-decoder GEMMs with K split across CTAs and fused consumers.
+option(FLASHRT_ENABLE_PI05_SKINNY "Build experimental Pi0.5 SM120 decoder kernels" OFF)
+if(FLASHRT_ENABLE_PI05_SKINNY AND NOT GPU_ARCH STREQUAL "120")
+  message(FATAL_ERROR "Pi0.5 skinny kernels require GPU_ARCH=120")
+endif()
+if(FLASHRT_ENABLE_PI05_SKINNY)
+  message(STATUS "Pi0.5 skinny decoder kernels: ENABLED (SM120, runtime opt-in)")
+  add_library(pi05_decoder_skinny_sm120_obj OBJECT
+    csrc/kernels/pi05/pi05_decoder_skinny_fp8_sm120.cu)
+  set_target_properties(pi05_decoder_skinny_sm120_obj PROPERTIES
+    CUDA_STANDARD 17
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(pi05_decoder_skinny_sm120_obj PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels
+  )
+  target_compile_options(pi05_decoder_skinny_sm120_obj PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:
+      --expt-relaxed-constexpr -O3
+      --ftz=true --prec-div=false --prec-sqrt=false
+      ${GPU_GENCODE}
+    >
+  )
+else()
+  message(STATUS "Pi0.5 skinny decoder kernels: DISABLED")
+endif()
+
 # ── CUTLASS SM120a NVFP4 W4A16 GEMM (Qwen3.6 NVFP4 ckpt) ──
 # Block-scaled FP4 e2m1 weights × FP4 e2m1 act (post quant) × FP8 ue4m3
 # group scales × BF16 output. Ported from NVIDIA unit test
@@ -1874,6 +1902,14 @@ if(GPU_ARCH STREQUAL "120")
     $<TARGET_OBJECTS:sm120_fp8_smallm_obj>)
   target_compile_definitions(flash_rt_kernels PRIVATE
     ENABLE_CUTLASS_SM120_BLOCK_FP8=1)
+endif()
+
+# Skinny FP8 decoder GEMM family: sm_120a only (mma.kind::f8f6f4).
+if(FLASHRT_ENABLE_PI05_SKINNY)
+  target_sources(flash_rt_kernels PRIVATE
+    $<TARGET_OBJECTS:pi05_decoder_skinny_sm120_obj>)
+  target_compile_definitions(flash_rt_kernels PRIVATE
+    FLASHRT_PI05_DECODER_SKINNY_SM120=1)
 endif()
 
 # Dedicated M=1 decode GEMV (FP8 + BF16); linked + macro defined wherever the
