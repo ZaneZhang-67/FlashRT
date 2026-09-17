@@ -374,12 +374,50 @@ same inputs: BF16 path per-token cosine 0.998 and pooled 1.0000; FP8
 path pooled 0.9999 (the export adds the last layer's residual that the
 fused FP8 path leaves pending). Batched: one feature vector per slot.
 
+### Weight hot swap (RL redeploy)
+
+```python
+rt.reload_weights(merged_state)      # a mapping of safetensors-style names, or a checkpoint dir
+rt.weight_version                    # 1, 2, ... after each reload
+```
+
+`reload_weights` writes a new set of weights into the running frontend
+without rebuilding a pipeline or re-capturing a graph: the BF16 weight
+tensors the pipelines point at are overwritten in place (the checkpoint
+conversion streams layer by layer straight into them), the FP8 weights and
+their per-tensor scales are re-quantized into the same buffers (transposed
+decoder copies included), the pre-computed decoder styles of every live
+pipeline are re-uploaded into the existing device buffers, and the current
+prompt(s) are re-embedded with the new embedding table. The captured
+graphs keep replaying; they read the same addresses. The FP8 activation
+scales stay as calibrated (they describe the activation range of the model
+that was calibrated, which moves little across the fine-tuning steps of an
+RL loop); call `calibrate` again to refresh them, which re-captures.
+
+Reload performs a complete streaming conversion preflight before writing
+live weights. Reload, inference, prompt changes and calibration are serialized
+per frontend. A preflight error leaves the model usable; any error after
+mutation permanently invalidates the frontend, and the caller must construct
+a new instance. It never continues inference with mixed weights.
+
+Neither construction nor reload calls `torch.cuda.empty_cache()`. Process-wide
+allocator management belongs to the caller. Earlier reload timing/memory
+measurements predate preflight validation and are not current guarantees.
+
+Against a frontend built fresh from the same weights on the same
+prompt, images and noise: BF16 cosine 0.99999, FP8 (scales kept) 0.9997–
+0.9999; replays after the reload are bit-identical; reloading the original
+weights restores the original output (`tests/test_pi05_weight_reload.py`).
+INT8 modes are not supported.
+
 ## Tests
 
 | test | what it validates |
 |---|---|
 | `tests/test_pi05_seeded_noise_trace.py` | noise injection / seeded reproducibility, trace self-consistency, batched per-slot trace |
 | `tests/test_pi05_batched_n.py` | B = 4 / 8 batched slots vs B = 1, per-env timing, prefix features single vs batched and FP8 vs BF16, CFG refuses B ≠ 2 |
+| `tests/test_pi05_decoder_skinny.py` | skinny FP8 decoder family (sm_120a): GEMM vs FP32, consumers bit-identical to the kernels they replace, attention vs torch, frontend vs the library decoder plus 300 bit-identical replays, batched vs batched |
+| `tests/test_pi05_weight_reload.py` | in-place weight reload vs a fresh build (BF16 and FP8), no re-capture, batched pipeline, mapping source, restore |
 | `tests/test_rl_cfg_inference.py` | RTX serial + batched CFG, all βs, validation gates |
 | `tests/test_thor_rl_cfg_inference.py --backends torch,jax` | Thor serial CFG: validation, β=1.0 collapse, β=1.5 finite |
 | `tests/test_cfg_correctness_oracle.py` | per-step C1–C5 contract (RTX) vs frozen reference |
